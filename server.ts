@@ -5,14 +5,18 @@ import path from 'path';
 import cron from 'node-cron';
 import axios from 'axios';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, doc, setDoc, collection, addDoc, getDocs, query, orderBy, limit } from 'firebase/firestore';
+import { initializeFirestore, doc, setDoc, collection, addDoc, getDocs, query, orderBy, limit } from 'firebase/firestore';
 import firebaseConfig from './firebase-applet-config.json';
 import 'dotenv/config';
 
 // Initialize Firebase for the server
 const firebaseApp = initializeApp(firebaseConfig);
 const dbId = (firebaseConfig as any).firestoreDatabaseId;
-const db = dbId ? getFirestore(firebaseApp, dbId) : getFirestore(firebaseApp);
+
+// Use 'experimentalForceLongPolling' to prevent RST_STREAM errors in restricted environments
+const db = initializeFirestore(firebaseApp, {
+  experimentalForceLongPolling: true,
+}, dbId || '(default)');
 
 async function startServer() {
   const app = express();
@@ -118,9 +122,10 @@ async function startServer() {
         }
 
         if (status === 401 || status === 403) {
+          const detectedPrefix = apiKey ? apiKey.substring(0, 5) : 'NONE';
           let msg = apiKey 
-            ? `CoinGecko Authentication Failed (${status}). Detected Key Prefix: "${apiKey.substring(0, 10)}...". ACTION: Please verify this prefix matches your key in the CoinGecko dashboard and ensure you have verified your email.`
-            : `CoinGecko Public Access Blocked (${status}). An API Key is required for this dashboard.`;
+            ? `CoinGecko Authentication Failed (${status}). Detected Prefix: "${detectedPrefix}...". IMPORTANT: We detected "CG-Q9", but you previously mentioned "CG-09". Please verify you didn't mistake a 'Q' for a '0' in Settings.`
+            : `CoinGecko Public Access Blocked (${status}). An API Key is required for cloud hosting.`;
           console.error(`[CoinGecko Critical] ${msg}`);
           error.customMessage = msg;
         } else if (status === 429) {
