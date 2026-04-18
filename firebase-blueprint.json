@@ -1,0 +1,44 @@
+{
+  "entities": {
+    "MarketData": {
+      "title": "Market Data",
+      "description": "Real-time cryptocurrency market data",
+      "type": "object",
+      "properties": {
+        "coin_id": { "type": "string" },
+        "symbol": { "type": "string" },
+        "name": { "type": "string" },
+        "current_price": { "type": "number" },
+        "market_cap": { "type": "number" },
+        "total_volume": { "type": "number" },
+        "price_change_24h": { "type": "number" },
+        "market_cap_rank": { "type": "integer" },
+        "volatility_score": { "type": "number" },
+        "extracted_at": { "type": "string", "format": "date-time" }
+      },
+      "required": ["coin_id", "symbol", "name", "current_price", "extracted_at"]
+    },
+    "Alerts": {
+      "title": "Alerts",
+      "description": "Real-time market alerts",
+      "type": "object",
+      "properties": {
+        "coin_id": { "type": "string" },
+        "type": { "type": "string", "enum": ["PRICE_DROP", "VOLUME_SPIKE"] },
+        "message": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["coin_id", "type", "message", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/crypto_market/{coinId}": {
+      "schema": "MarketData",
+      "description": "Latest market data for each coin"
+    },
+    "/alerts/{alertId}": {
+      "schema": "Alerts",
+      "description": "Recent market alerts"
+    }
+  }
+}
