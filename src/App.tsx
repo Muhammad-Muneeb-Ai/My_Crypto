@@ -73,6 +73,9 @@ export default function App() {
   };
 
   useEffect(() => {
+    // Basic connectivity check
+    if (!db) return;
+    
     // Listen to market data
     const qMarket = query(collection(db, 'crypto_market'), orderBy('market_cap', 'desc'));
     const unsubscribeMarket = onSnapshot(qMarket, (snapshot) => {

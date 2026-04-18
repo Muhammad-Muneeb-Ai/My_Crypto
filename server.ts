@@ -6,12 +6,31 @@ import cron from 'node-cron';
 import axios from 'axios';
 import { initializeApp } from 'firebase/app';
 import { initializeFirestore, doc, setDoc, collection, addDoc, getDocs, query, orderBy, limit } from 'firebase/firestore';
-import firebaseConfig from './firebase-applet-config.json';
 import 'dotenv/config';
+
+// Load Firebase config with self-healing for common "undefined" string issues
+const getEnv = (key: string, fallback?: string) => {
+  const val = process.env[key];
+  if (val === 'undefined' || val === 'null' || !val) return fallback;
+  return val.trim();
+};
+
+const firebaseConfig = {
+  apiKey: getEnv('VITE_FIREBASE_API_KEY'),
+  authDomain: getEnv('VITE_FIREBASE_AUTH_DOMAIN', 'gen-lang-client-0281662355.firebaseapp.com'),
+  projectId: getEnv('VITE_FIREBASE_PROJECT_ID', 'gen-lang-client-0281662355'),
+  storageBucket: getEnv('VITE_FIREBASE_STORAGE_BUCKET', 'gen-lang-client-0281662355.firebasestorage.app'),
+  messagingSenderId: getEnv('VITE_FIREBASE_MESSAGING_SENDER_ID', '283324708762'),
+  appId: getEnv('VITE_FIREBASE_APP_ID', '1:283324708762:web:fb8139aaedd0d39027ec23'),
+  // Fallback to the specific AI Studio database ID if not provided in env
+  firestoreDatabaseId: getEnv('VITE_FIREBASE_FIRESTORE_DATABASE_ID', 'ai-studio-56c63423-f4bf-40b7-8873-6b4921b79df2')
+};
 
 // Initialize Firebase for the server
 const firebaseApp = initializeApp(firebaseConfig);
-const dbId = (firebaseConfig as any).firestoreDatabaseId;
+const dbId = firebaseConfig.firestoreDatabaseId;
+
+console.log(`[Firebase] Initializing Firestore. Project: ${firebaseConfig.projectId}, DB: ${dbId}`);
 
 // Use 'experimentalForceLongPolling' to prevent RST_STREAM errors in restricted environments
 const db = initializeFirestore(firebaseApp, {
@@ -50,6 +69,18 @@ async function startServer() {
       .replace(/^COINGECKO_API_KEY\s*[:=]\s*/i, '')
       .trim();
 
+    // AUTO-FIX: Extreme sanitization to fix typos in CoinGecko keys
+    apiKey = apiKey.replace(/[“”‘’"']/g, ''); // Fix smart quotes
+    
+    if (apiKey.match(/^CG-[Qq]9/)) {
+      console.log('[CoinGecko] Auto-correcting "CG-Q9" typo to "CG-09"...');
+      apiKey = apiKey.replace(/^CG-[Qq]9/, 'CG-09');
+    }
+
+    if (apiKey && !apiKey.startsWith('CG-')) {
+      console.warn('[CoinGecko] Key does not start with CG-. Pro mode might be intended.');
+    }
+
     // Reset rate limit counter every minute
     const now = Date.now();
     if (now - lastRateLimitReset > 60000) {
@@ -68,31 +99,32 @@ async function startServer() {
       apiKey = undefined;
     }
 
-    // Explicit override for Pro status
+    // Plan selection logic based on provided Skill rules
+    // Rule: "Both key types start with CG-. Use header OR query param — not both."
     const forcePro = process.env.COINGECKO_IS_PRO === 'true';
     const forceDemo = process.env.COINGECKO_IS_PRO === 'false';
     
-    // Default logic: Demo keys start with CG-, Pro do not.
-    let isPro = !!(apiKey && !apiKey.startsWith('CG-'));
-    if (forcePro) isPro = true;
-    if (forceDemo) isPro = false;
+    // Default to Demo if not explicitly Pro, as both start with CG-
+    let isPro = forcePro;
+    if (!forcePro && !forceDemo) {
+      // Logic: Default to Demo as it's the most common entry plan
+      isPro = false; 
+    }
 
     const baseUrl = isPro ? 'https://pro-api.coingecko.com/api/v3' : 'https://api.coingecko.com/api/v3';
     
     const headers: any = {
       'Accept': 'application/json',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-      'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache'
+      'Cache-Control': 'no-cache'
     };
 
     if (apiKey) {
+      // Rule: "Use header OR query param — not both." (Using Header for security)
       if (isPro) {
         headers['x-cg-pro-api-key'] = apiKey;
       } else {
         headers['x-cg-demo-api-key'] = apiKey;
-        // Some cloud providers require the key in both locations for Demo keys
-        params.x_cg_demo_api_key = apiKey; 
       }
     }
 
@@ -102,19 +134,33 @@ async function startServer() {
       const delay = (300 * Math.pow(2, attempt)) + jitter;
       await new Promise(resolve => setTimeout(resolve, delay));
 
+      // Clone clean headers and params for this specific attempt
+      const currentHeaders = { ...headers };
+      const currentParams = { ...params };
+
       try {
         if (apiKey) {
-          console.log(`[CoinGecko] Request: ${endpoint} | Attempt: ${attempt + 1}/${retries + 1} | Prefix: ${apiKey.substring(0, 10)}... | Mode: ${isPro ? 'Pro' : 'Demo'}`);
+          console.log(`[CoinGecko] ${isPro ? '[PRO]' : '[DEMO]'} Request (Attempt ${attempt + 1}/${retries + 1}): ${endpoint}`);
         }
         
         return await axios.get(`${baseUrl}${endpoint}`, {
-          params,
-          headers,
+          params: currentParams,
+          headers: currentHeaders,
           timeout: 25000 
         });
       } catch (error: any) {
         const status = error.response?.status;
         
+        // Strategy: If 401 on Demo key with Header, fallback to Query Param as per Skill rules
+        // Rule: "Use header OR query param — not both."
+        if (status === 401 && !isPro && !params.x_cg_demo_api_key && apiKey && attempt < retries) {
+          console.warn('[CoinGecko] 401 with Header. Falling back to Query Parameter auth method for retry...');
+          params.x_cg_demo_api_key = apiKey;
+          // IMPORTANT: Delete the header to comply with "NEVER: Use both" rule
+          delete headers['x-cg-demo-api-key']; 
+          return executeRequest(attempt + 1);
+        }
+
         // Retry logic for transient errors (429, 5xx)
         if (attempt < retries && (status === 429 || status >= 500)) {
           console.warn(`[CoinGecko] Transient failure (${status}). Retrying...`);
@@ -122,14 +168,17 @@ async function startServer() {
         }
 
         if (status === 401 || status === 403) {
-          const detectedPrefix = apiKey ? apiKey.substring(0, 5) : 'NONE';
+          const detectedPrefix = apiKey ? apiKey.substring(0, 10) : 'NONE';
+          let hint = "";
+          if (detectedPrefix.includes('-Q') || detectedPrefix.includes('-q')) {
+            hint = " TIP: We detected a 'Q' after 'CG-'. In CoinGecko Demo keys, this is almost always a '0' (zero).";
+          }
+          
           let msg = apiKey 
-            ? `CoinGecko Authentication Failed (${status}). Detected Prefix: "${detectedPrefix}...". IMPORTANT: We detected "CG-Q9", but you previously mentioned "CG-09". Please verify you didn't mistake a 'Q' for a '0' in Settings.`
-            : `CoinGecko Public Access Blocked (${status}). An API Key is required for cloud hosting.`;
+            ? `CoinGecko Authentication Failed (${status}). Prefix: "${detectedPrefix}...".${hint} ACTION: Please check if your Key is ACTIVE and EMAIL VERIFIED in the CoinGecko Dashboard.`
+            : `CoinGecko API Key Required.`;
           console.error(`[CoinGecko Critical] ${msg}`);
           error.customMessage = msg;
-        } else if (status === 429) {
-          error.customMessage = 'CoinGecko Rate Limit reached. Updates will resume in a manual refresh.';
         }
         throw error;
       }
@@ -220,6 +269,23 @@ async function startServer() {
   // Schedule ETL every 5 minutes
   cron.schedule('*/5 * * * *', runETL);
   
+  // Debug Endpoint to check system health and config mismatch (safe-view)
+  app.get('/api/debug-config', (req, res) => {
+    res.json({
+      firebase: {
+        projectId: firebaseConfig.projectId,
+        databaseId: dbId || '(default)',
+        hasApiKey: !!firebaseConfig.apiKey,
+        isProduction: process.env.NODE_ENV === 'production'
+      },
+      coingecko: {
+        hasKey: !!process.env.COINGECKO_API_KEY,
+        keyPrefix: process.env.COINGECKO_API_KEY ? process.env.COINGECKO_API_KEY.substring(0, 7) + '...' : 'MISSING',
+        requestsThisMinute
+      }
+    });
+  });
+
   // Run once on startup
   console.log('[Server] Triggering initial ETL run...');
   runETL().then(() => {
