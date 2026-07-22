@@ -60,6 +60,8 @@ export function CoinDetailChart({ coinId, coinName }: CoinDetailChartProps) {
         
         if (err.code === 'ECONNABORTED') {
           setError('Historical data fetch timed out. Try again in a moment.');
+        } else if (err.response?.status === 429) {
+          setError('CoinGecko Rate Limit reached (30 calls/min). Please wait 60 seconds.');
         } else {
           setError(serverError || serverDetails || err.message || 'Failed to load market history.');
         }

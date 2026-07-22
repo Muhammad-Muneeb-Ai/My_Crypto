@@ -6,9 +6,10 @@ import { MarketData } from '../types';
 
 interface AIAnalystProps {
   marketData: MarketData[];
+  summary?: any;
 }
 
-export function AIAnalyst({ marketData }: AIAnalystProps) {
+export function AIAnalyst({ marketData, summary }: AIAnalystProps) {
   const [query, setQuery] = useState('');
   const [response, setResponse] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -18,7 +19,7 @@ export function AIAnalyst({ marketData }: AIAnalystProps) {
     if (!query.trim() || loading) return;
 
     setLoading(true);
-    const result = await analyzeMarket(marketData, query);
+    const result = await analyzeMarket(marketData, query, summary);
     setResponse(result);
     setLoading(false);
   };

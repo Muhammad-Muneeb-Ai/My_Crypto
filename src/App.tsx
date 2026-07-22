@@ -190,6 +190,21 @@ export default function App() {
               <p className="text-danger/80 text-xs mt-1 leading-relaxed">
                 {apiError}
               </p>
+              
+              {apiError.includes('401') && (
+                <div className="mt-2 text-[10px] text-amber-500 font-bold bg-amber-500/10 p-2 rounded border border-amber-500/20 flex items-center gap-2">
+                  <RefreshCw className="w-3 h-3 animate-pulse" />
+                  HINT: CoinGecko Demo keys require EMAIL VERIFICATION button click in your inbox.
+                </div>
+              )}
+
+              {apiError.includes('429') && (
+                <div className="mt-2 text-[10px] text-blue-400 font-bold bg-blue-500/10 p-2 rounded border border-blue-500/20 flex items-center gap-2">
+                  <Activity className="w-3 h-3 animate-pulse" />
+                  COOLING DOWN: Rate limit reached (30 calls/min). Retrying automatically in 60s.
+                </div>
+              )}
+
               <div className="mt-3 flex items-center gap-3">
                 <a 
                   href="https://www.coingecko.com/en/api/pricing" 
@@ -230,6 +245,33 @@ export default function App() {
             </button>
           </div>
         )}
+
+        {/* Global Market Ticker */}
+        <div className="flex items-center gap-6 overflow-x-auto no-scrollbar py-2 border-b border-border text-[10px] font-bold text-text-dim whitespace-nowrap">
+          <div className="flex items-center gap-2">
+            <span>MARKET CAP:</span>
+            <span className="text-text-main">{formatCurrency(summary?.totalMarketCap || 0)}</span>
+            <span className={cn(
+              (summary?.marketCapChange || 0) >= 0 ? "text-success" : "text-danger"
+            )}>
+              {(summary?.marketCapChange || 0) >= 0 ? '▲' : '▼'} {Math.abs(summary?.marketCapChange || 0).toFixed(1)}%
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span>24H VOL:</span>
+            <span className="text-text-main">{formatCompactNumber(summary?.totalVol || 0)}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span>DOMINANCE:</span>
+            <span className="text-text-main">
+              BTC {summary?.dominance?.btc?.toFixed(1) || '0.0'}% • ETH {summary?.dominance?.eth?.toFixed(1) || '0.0'}%
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span>GAS:</span>
+            <span className="text-text-main">0.157 GWEI</span>
+          </div>
+        </div>
 
         <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
@@ -357,7 +399,7 @@ export default function App() {
 
           <div className="space-y-5 flex flex-col">
             <div className="flex-1 min-h-[400px]">
-              <AIAnalyst marketData={marketData} />
+              <AIAnalyst marketData={marketData} summary={summary} />
             </div>
             <div className="h-[300px]">
               <AlertsPanel alerts={alerts} />

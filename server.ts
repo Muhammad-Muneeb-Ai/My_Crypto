@@ -69,14 +69,11 @@ async function startServer() {
       .replace(/^COINGECKO_API_KEY\s*[:=]\s*/i, '')
       .trim();
 
-    // AUTO-FIX: Extreme sanitization to fix typos in CoinGecko keys
+    // AUTO-FIX: Extreme sanitization (handles quotes, accidental labels, and whitespace)
     apiKey = apiKey.replace(/[“”‘’"']/g, ''); // Fix smart quotes
     
-    if (apiKey.match(/^CG-[Qq]9/)) {
-      console.log('[CoinGecko] Auto-correcting "CG-Q9" typo to "CG-09"...');
-      apiKey = apiKey.replace(/^CG-[Qq]9/, 'CG-09');
-    }
-
+    // NOTE: We previously auto-corrected 'Q' to '0' but the user confirmed 'Q' is literal for their key.
+    // We only keep basic prefix checks.
     if (apiKey && !apiKey.startsWith('CG-')) {
       console.warn('[CoinGecko] Key does not start with CG-. Pro mode might be intended.');
     }
@@ -120,18 +117,21 @@ async function startServer() {
     };
 
     if (apiKey) {
-      // Rule: "Use header OR query param — not both." (Using Header for security)
+      // Rule: "Use header OR query param — not both." 
+      // Strategy: Use Query Parameters for DEMO keys by default, Header for PRO.
+      // Demo keys (api.coingecko.com) often have better reliability with query params in this environment.
       if (isPro) {
         headers['x-cg-pro-api-key'] = apiKey;
       } else {
-        headers['x-cg-demo-api-key'] = apiKey;
+        // We use query param for Demo as primary to avoid common header issues
+        params.x_cg_demo_api_key = apiKey;
       }
     }
 
     const executeRequest = async (attempt: number): Promise<any> => {
-      // Mandatory staggered delay with jitter (300ms, 600ms, 1200ms...)
+      // Mandatory staggered delay with jitter
       const jitter = Math.random() * 100;
-      const delay = (300 * Math.pow(2, attempt)) + jitter;
+      const delay = (attempt > 0 ? 1000 : 0) + (300 * Math.pow(2, attempt)) + jitter;
       await new Promise(resolve => setTimeout(resolve, delay));
 
       // Clone clean headers and params for this specific attempt
@@ -151,13 +151,11 @@ async function startServer() {
       } catch (error: any) {
         const status = error.response?.status;
         
-        // Strategy: If 401 on Demo key with Header, fallback to Query Param as per Skill rules
-        // Rule: "Use header OR query param — not both."
-        if (status === 401 && !isPro && !params.x_cg_demo_api_key && apiKey && attempt < retries) {
-          console.warn('[CoinGecko] 401 with Header. Falling back to Query Parameter auth method for retry...');
-          params.x_cg_demo_api_key = apiKey;
-          // IMPORTANT: Delete the header to comply with "NEVER: Use both" rule
-          delete headers['x-cg-demo-api-key']; 
+        // Strategy swap for 401: If Query Param failed on Demo, try Header as last resort
+        if (status === 401 && !isPro && params.x_cg_demo_api_key && attempt < retries) {
+          console.warn('[CoinGecko] 401 with Query Param. Trying Header method as fallback...');
+          delete params.x_cg_demo_api_key;
+          headers['x-cg-demo-api-key'] = apiKey;
           return executeRequest(attempt + 1);
         }
 
@@ -169,13 +167,10 @@ async function startServer() {
 
         if (status === 401 || status === 403) {
           const detectedPrefix = apiKey ? apiKey.substring(0, 10) : 'NONE';
-          let hint = "";
-          if (detectedPrefix.includes('-Q') || detectedPrefix.includes('-q')) {
-            hint = " TIP: We detected a 'Q' after 'CG-'. In CoinGecko Demo keys, this is almost always a '0' (zero).";
-          }
+          let hint = " ACTION: Please check if your Key is ACTIVE and EMAIL VERIFIED in the CoinGecko Dashboard.";
           
           let msg = apiKey 
-            ? `CoinGecko Authentication Failed (${status}). Prefix: "${detectedPrefix}...".${hint} ACTION: Please check if your Key is ACTIVE and EMAIL VERIFIED in the CoinGecko Dashboard.`
+            ? `CoinGecko Authentication Failed (${status}). Prefix: "${detectedPrefix}...". ${hint}`
             : `CoinGecko API Key Required.`;
           console.error(`[CoinGecko Critical] ${msg}`);
           error.customMessage = msg;
@@ -191,7 +186,8 @@ async function startServer() {
   const runETL = async () => {
     console.log('[ETL] Starting extraction from CoinGecko...');
     try {
-      const response = await fetchFromCoinGecko('/coins/markets', {
+      // Fetch Market Markets (top 20)
+      const marketResponse = await fetchFromCoinGecko('/coins/markets', {
         vs_currency: 'usd',
         order: 'market_cap_desc',
         per_page: 20,
@@ -199,7 +195,16 @@ async function startServer() {
         sparkline: false
       });
 
-      const coins = response.data;
+      // Fetch Global Data (Dominance, Cap, etc.)
+      let globalData = null;
+      try {
+        const globalResponse = await fetchFromCoinGecko('/global');
+        globalData = globalResponse.data.data;
+      } catch (e) {
+        console.warn('[ETL] Global data fetch failed (ignoring):', e.message);
+      }
+
+      const coins = marketResponse.data;
       const extractedAt = new Date().toISOString();
 
       console.log(`[ETL] Extracted ${coins.length} coins. Transforming and Loading...`);
@@ -255,6 +260,9 @@ async function startServer() {
           avgPrice,
           topGainer,
           mostVolatile,
+          dominance: globalData?.market_cap_percentage || { btc: 0, eth: 0 },
+          totalVol: globalData?.total_volume?.usd || 0,
+          marketCapChange: globalData?.market_cap_change_percentage_24h_usd || 0,
           count: newCache.length,
           lastUpdated: extractedAt
         };
@@ -362,7 +370,7 @@ async function startServer() {
   });
 
   const historyCache: Record<string, { data: any, timestamp: number }> = {};
-  const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+  const CACHE_DURATION = 15 * 60 * 1000; // Increased to 15 minutes to stay under Demo limits
 
   app.get('/api/coin-history/:id', async (req, res) => {
     const { id } = req.params;
@@ -391,7 +399,8 @@ async function startServer() {
 
       res.json(response.data);
     } catch (error: any) {
-      console.error(`[API] Failed to fetch history for ${id} (days: ${days}):`, error.message);
+      const status = error.response?.status;
+      console.error(`[API] Failed to fetch history for ${id} (days: ${days}): status ${status}`);
       
       // If we have stale cache, serve it on error as fallback
       if (cached) {
@@ -399,8 +408,15 @@ async function startServer() {
         return res.json(cached.data);
       }
 
-      res.status(error.response?.status || 500).json({ 
-        error: error.customMessage || 'Failed to fetch coin history',
+      if (status === 429) {
+        return res.status(429).json({
+          error: 'CoinGecko Rate Limit reached (30 calls/min).',
+          details: 'Please wait 60 seconds. Caching has been increased to 15m to prevent this.'
+        });
+      }
+
+      res.status(status || 500).json({ 
+        error: error.customMessage || 'Market History Sync Failed',
         details: error.response?.data || error.message
       });
     }
